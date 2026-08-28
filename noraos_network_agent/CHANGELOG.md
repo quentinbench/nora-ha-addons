@@ -1,5 +1,11 @@
 # Changelog — NoraOS Network Agent
 
+## 0.3.2
+- 🏷️ **Slug renommé** `mystock_network_agent` → **`noraos_network_agent`** (rebranding NoraOS complet,
+  dossier du dépôt inclus). ⚠️ Le slug étant l'identité de l'add-on côté HA, c'est un **nouvel add-on** :
+  une installation issue de l'ancien slug devient orpheline → **réinstaller** « NoraOS Network Agent »
+  depuis la boutique et ressaisir `backend_url` + `pairing_token`. L'ancien dossier est retiré du dépôt.
+
 ## 0.3.1
 - 🏷️ **Renommage** : l'add-on s'appelle désormais **« NoraOS Network Agent »** (dépôt **« NoraOS Add-ons »**).
   Le slug interne (`mystock_network_agent`) est **inchangé** → mise à jour automatique préservée, aucune
