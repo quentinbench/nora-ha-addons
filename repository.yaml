@@ -4,6 +4,6 @@
 # `mystock_network_agent/`) contenant son `config.yaml`.
 # Les clients ajoutent l'URL de ce dépôt dans HA → Paramètres → Modules complémentaires →
 # Boutique → ⋮ → Dépôts.
-name: MyStock Add-ons
+name: NoraOS Add-ons
 url: "https://github.com/quentinbench/nora-ha-addons"
 maintainer: MyInfinity <quentin@my-infinity.eu>

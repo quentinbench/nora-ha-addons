@@ -1,4 +1,11 @@
-# Changelog — MyStock Network Agent
+# Changelog — NoraOS Network Agent
+
+## 0.3.1
+- 🏷️ **Renommage** : l'add-on s'appelle désormais **« NoraOS Network Agent »** (dépôt **« NoraOS Add-ons »**).
+  Le slug interne (`mystock_network_agent`) est **inchangé** → mise à jour automatique préservée, aucune
+  réinstallation ni ressaisie du token. La connexion reste vers votre instance **MyStock** (backend).
+- 📖 **Documentation** : README du dépôt + doc de l'add-on clarifiés — installation via la **boutique de
+  modules complémentaires** (Add-on Store), **pas via HACS** (HACS ne gère pas les add-ons).
 
 ## 0.3.0
 - 🖨️ **Rastérisation PDF → PWG-Raster** en **opt-in par imprimante** (`capabilities.rasterize`).

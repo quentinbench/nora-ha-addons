@@ -1,4 +1,4 @@
-# Agent réseau MyStock — impression IPP & scan eSCL
+# NoraOS Network Agent — impression IPP & scan eSCL (agent réseau MyStock)
 
 Petit service à déployer **sur le réseau local de chaque site** (bureaux, entrepôt). Il permet à
 MyStock (hébergé à distance) de **découvrir**, **imprimer** et **scanner** sur des imprimantes et
@@ -19,37 +19,40 @@ et y reçoit les jobs. Aucune redirection de port ni IP publique nécessaire.
 
 ## Installation — add-on Home Assistant (recommandé)
 
-Si Home Assistant tourne chez vous (HA OS / Supervised), le plus simple est d'installer l'agent
-comme **add-on local** : il tourne sur la même machine que HA, sur le réseau local du site.
+Si Home Assistant tourne chez vous (HA **OS** / **Supervised**), installez l'agent comme **add-on**
+depuis le **dépôt d'add-ons NoraOS**. Il tourne sur la même machine que HA, sur le réseau local du site.
+
+> ⚠️ **Add-on, pas HACS.** Le dépôt s'ajoute dans la **boutique de modules complémentaires**
+> (Add-on Store), **pas dans HACS** (HACS ne gère pas les add-ons et refusera l'URL).
 
 1. **Récupérer le token** dans MyStock : *Configurations → Impression / Scan réseau → Sites / Agents*
    → ajouter un site, **Enregistrer**, puis **« Générer les tokens d'appairage »** et copier le token.
 
-2. **Accéder au dossier `/addons`** de HA : installer l'un de ces add-ons officiels —
-   *« Studio Code Server »*, *« Advanced SSH & Web Terminal »*, *« File editor »* ou *« Samba share »*.
+2. HA → **Paramètres → Modules complémentaires → Boutique** → **⋮ → Dépôts** → coller l'URL du dépôt
+   puis **Ajouter** :
 
-3. **Copier ce dossier `agent/`** dans `/addons/mystock_network_agent/` (les fichiers
-   `config.yaml`, `Dockerfile`, `package.json`, `tsconfig.json` et `src/` — **pas** `node_modules/`
-   ni `dist/`).
+   ```
+   https://github.com/quentinbench/nora-ha-addons
+   ```
 
-4. HA → **Paramètres → Modules complémentaires → Boutique** → menu **⋮** (en haut à droite) →
-   **« Vérifier les mises à jour »**. Une section **« Add-ons locaux »** apparaît avec
-   **« MyStock Network Agent »**.
+3. Le dépôt **« NoraOS Add-ons »** apparaît ; l'add-on **« NoraOS Network Agent »** y est listé →
+   **Installer** (HA build l'image Docker — quelques minutes).
 
-5. Cliquer dessus → **Installer** (HA build l'image Docker — quelques minutes).
-
-6. Onglet **Configuration** de l'add-on :
+4. Onglet **Configuration** de l'add-on :
    - `backend_url` : l'URL de votre instance MyStock (ex. `https://votre-instance.my-stock.fr`)
    - `pairing_token` : le token copié à l'étape 1
-   Puis **Démarrer**.
+   Puis **Démarrer**, et activez **« Démarrer au démarrage »** + **« Mise à jour automatique »**.
 
-7. Onglet **Journal (Log)** : vous devez voir `connecté au backend` puis les appareils découverts.
+5. Onglet **Journal (Log)** : vous devez voir `connecté au backend` puis les appareils découverts.
    Dans MyStock, le scanner Brother (et les imprimantes IPP) apparaissent → utilisables, avec le
    choix **Vitre / Chargeur (ADF)** sur les boutons de scan.
 
 > L'add-on utilise `host_network: true` (nécessaire pour la découverte mDNS / WS-Discovery et
 > l'accès direct aux imprimantes/scanners du LAN). Aucun port entrant n'est ouvert : l'agent ne
 > fait que des connexions **sortantes** vers MyStock.
+>
+> _Publication : ce dépôt est alimenté automatiquement par `agent/release-addon.sh` depuis le
+> monorepo (source de vérité). Ne pas éditer les fichiers du dépôt d'add-ons à la main._
 
 ## Installation — Docker standalone (hors HA OS)
 

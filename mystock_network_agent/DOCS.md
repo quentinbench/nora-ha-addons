@@ -1,15 +1,20 @@
-# MyStock Network Agent — Add-on Home Assistant
+# NoraOS Network Agent — Add-on Home Assistant
 
 Agent local qui relie les **imprimantes** et **scanners** du réseau local à MyStock :
 impression **IPP** / **ZPL (Zebra)** / **ESC/POS (ticket)**, scan **eSCL/WSD** (chargeur ADF multi-pages).
 Il ouvre une connexion **SSE sortante** vers MyStock (compatible NAT, aucun port à ouvrir) et
 s'authentifie par un **token d'appairage** propre au site.
 
+> ⚠️ **C'est un add-on, pas une intégration HACS.** Ce dépôt s'ajoute dans la **boutique de modules
+> complémentaires** (Add-on Store), **pas dans HACS**. HACS le refuse (« does not seem to be a
+> integration, but an add-on repository »), c'est normal. Prérequis : Home Assistant **OS** ou
+> **Supervised** (la boutique d'add-ons n'existe pas sur HA Container / Core).
+
 ## Installation
 
 1. Dans Home Assistant : **Paramètres → Modules complémentaires → Boutique**.
-2. En haut à droite **⋮ → Dépôts**, ajoutez l'URL de ce dépôt, puis fermez.
-3. Le module **« MyStock Network Agent »** apparaît dans la liste → **Installer**.
+2. En haut à droite **⋮ → Dépôts**, ajoutez l'URL de ce dépôt (`https://github.com/quentinbench/nora-ha-addons`), puis fermez.
+3. Le module **« NoraOS Network Agent »** apparaît dans la liste → **Installer**.
 4. Onglet **Configuration**, renseignez :
    - `backend_url` : l'URL de votre instance MyStock (ex : `https://app.my-stock.fr`).
    - `pairing_token` : le token d'appairage généré dans MyStock

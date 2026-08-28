@@ -1,4 +1,4 @@
-# Dockerfile de l'add-on Home Assistant "MyStock Network Agent".
+# Dockerfile de l'add-on Home Assistant "NoraOS Network Agent".
 # (Pour un déploiement Docker standalone hors HA, voir Dockerfile.agent + docker-compose.agent.yml.)
 FROM node:22-alpine AS build
 WORKDIR /app

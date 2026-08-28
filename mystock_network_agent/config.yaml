@@ -1,10 +1,13 @@
 # Manifeste add-on Home Assistant pour l'agent réseau MyStock.
 # Permet d'installer l'agent comme add-on LOCAL dans Home Assistant OS / Supervised.
-name: MyStock Network Agent
+name: NoraOS Network Agent
 # ⚠️ Home Assistant ne propose une mise à jour de l'add-on QUE si ce numéro change.
 # À INCRÉMENTER à chaque évolution du code agent (sinon les sites restent sur une vieille build :
 # ex. le support Zebra ZPL / ESC/POS / scan multi-pages n'était jamais arrivé sur site car figé en 0.1.0).
-version: "0.3.0"
+version: "0.3.1"
+# ⚠️ slug interne conservé (mystock_network_agent) : NE PAS le renommer sans nécessité — le changer
+# ferait apparaître l'add-on comme un NOUVEAU module dans HA (réinstall + retaper le token). Le
+# rebranding "NoraOS" ne porte que sur `name` (affiché). Le slug pilote aussi le dossier du dépôt.
 slug: mystock_network_agent
 description: Impression IPP/ZPL (Zebra)/ESC/POS (ticket) et scan eSCL/WSD (ADF multi-pages) sur le réseau local, relié à MyStock.
 url: https://www.my-stock.fr
