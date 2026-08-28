@@ -1,0 +1,27 @@
+# Manifeste add-on Home Assistant pour l'agent réseau MyStock.
+# Permet d'installer l'agent comme add-on LOCAL dans Home Assistant OS / Supervised.
+name: MyStock Network Agent
+# ⚠️ Home Assistant ne propose une mise à jour de l'add-on QUE si ce numéro change.
+# À INCRÉMENTER à chaque évolution du code agent (sinon les sites restent sur une vieille build :
+# ex. le support Zebra ZPL / ESC/POS / scan multi-pages n'était jamais arrivé sur site car figé en 0.1.0).
+version: "0.3.0"
+slug: mystock_network_agent
+description: Impression IPP/ZPL (Zebra)/ESC/POS (ticket) et scan eSCL/WSD (ADF multi-pages) sur le réseau local, relié à MyStock.
+url: https://www.my-stock.fr
+arch:
+  - aarch64
+  - amd64
+  - armv7
+# Réseau hôte requis : découverte mDNS / WS-Discovery + accès direct aux imprimantes (IPP)
+# et scanners (eSCL/WSD) du LAN.
+host_network: true
+# Pas de superviseur s6 : on lance directement le process Node.
+init: false
+boot: auto
+startup: application
+options:
+  backend_url: ""
+  pairing_token: ""
+schema:
+  backend_url: str
+  pairing_token: str

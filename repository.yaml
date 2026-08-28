@@ -1,0 +1,9 @@
+# Manifeste de dépôt d'add-ons Home Assistant.
+# Ce fichier doit se trouver à la RACINE du dépôt d'add-on publié (pas dans le monorepo).
+# Il est copié à la racine par `release-addon.sh`. Chaque add-on = un sous-dossier (ex:
+# `mystock_network_agent/`) contenant son `config.yaml`.
+# Les clients ajoutent l'URL de ce dépôt dans HA → Paramètres → Modules complémentaires →
+# Boutique → ⋮ → Dépôts.
+name: MyStock Add-ons
+url: "https://github.com/quentinbench/nora-ha-addons"
+maintainer: MyInfinity <quentin@my-infinity.eu>
