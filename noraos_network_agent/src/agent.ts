@@ -1,11 +1,18 @@
 /**
- * Agent local MyStock — Phase 1.
+ * Agent local MyStock.
  *
  * Déployé sur le LAN d'un site, il ouvre une connexion SSE SORTANTE vers le backend MyStock
- * (NAT-friendly), reçoit des jobs (discover/print/scan) et POST les résultats.
+ * (NAT-friendly), va chercher les travaux qui l'attendent et en accuse réception.
  *   - découverte : mDNS (imprimantes IPP, scanners eSCL) + WS-Discovery (scanners WSD/Brother) ;
- *   - impression : IPP (Print-Job) ;
+ *   - impression : IPP (PDF) ou socket brute (ESC/POS, ZPL) selon l'appareil ;
  *   - scan : eSCL (AirScan) ou WSD (WS-Scan) selon le protocole de l'appareil.
+ *
+ * **Protocole 2 — l'agent tire son travail.** Avant, les travaux étaient poussés dans le flux
+ * temps réel : un travail lancé pendant une reconnexion était perdu sans laisser de trace, et
+ * deux agents connectés pour le même site imprimaient le même document en double. Désormais le
+ * flux ne sert qu'à réveiller l'agent ; celui-ci réserve les travaux un par un dans la file du
+ * backend, en récupère le contenu, et accuse réception. Les travaux sont traités **en série** :
+ * une imprimante en port brut (9100) n'accepte qu'une connexion à la fois.
  *
  * Config par variables d'environnement :
  *   BACKEND_URL    ex: https://client.my-stock.fr
@@ -15,12 +22,18 @@
 import * as fs from 'fs';
 
 import { discoverAll } from './discovery';
-import { probeIpp } from './probe';
+import { probePrinterCapabilities } from './probe';
 import { printPdf } from './print-ipp';
 import { printEscpos } from './print-escpos';
 import { scanEscl } from './scan-escl';
 import { scanWsd } from './scan-wsd';
 import { AgentDevice } from './types';
+
+/** Version du protocole parlé avec le backend (annoncée à la connexion). */
+const PROTOCOL_VERSION = 2;
+
+/** Version de l'agent — DOIT suivre `config.yaml`, sinon Home Assistant ne propose pas la mise à jour. */
+const AGENT_VERSION = '0.4.3';
 
 /**
  * Config : variables d'environnement (déploiement Docker standalone) OU options de l'add-on
@@ -42,17 +55,24 @@ function loadConfig(): { backendUrl: string; token: string } {
 const { backendUrl: BACKEND_URL, token: TOKEN } = loadConfig();
 const RECONNECT_MS = 3000;
 const DISCOVERY_MS = Number(process.env.DISCOVERY_MS) || 4000;
+/** Filet de sécurité : on repasse prendre le travail même si aucun réveil n'est arrivé. */
+const POLL_MS = Number(process.env.POLL_MS) || 30000;
 
 if (!BACKEND_URL || !TOKEN) {
     console.error('[agent] BACKEND_URL et PAIRING_TOKEN sont requis.');
     process.exit(1);
 }
 
+/** En-têtes d'authentification. Le jeton passe en en-tête, jamais dans l'URL (journaux d'accès). */
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+    return { Authorization: `Bearer ${TOKEN}`, ...extra };
+}
+
 async function postDevices(devices: unknown[]): Promise<void> {
     try {
         await fetch(`${BACKEND_URL}/api/network-agent/devices`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+            headers: authHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ devices }),
         });
         console.log(`[agent] ${devices.length} appareil(s) remonté(s).`);
@@ -65,7 +85,7 @@ async function postJobStatus(jobId: string, status: 'done' | 'error', error?: st
     try {
         await fetch(`${BACKEND_URL}/api/network-agent/jobs/${jobId}/result`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${TOKEN}` },
+            headers: authHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ status, error }),
         });
     } catch (e) {
@@ -80,7 +100,7 @@ async function postScanResult(jobId: string, buffer: Buffer, mime: string, fileN
     try {
         await fetch(`${BACKEND_URL}/api/network-agent/jobs/${jobId}/result`, {
             method: 'POST',
-            headers: { Authorization: `Bearer ${TOKEN}` },
+            headers: authHeaders(),
             body: fd,
         });
         console.log(`[agent] scan ${jobId} envoyé (${buffer.length} octets).`);
@@ -99,71 +119,200 @@ async function discover(): Promise<void> {
     }
 }
 
-async function handlePrint(job: any): Promise<void> {
-    const device = job.device as AgentDevice;
-    const protocol = device?.capabilities?.['protocol'];
-    try {
-        if (protocol === 'escpos') {
-            // Imprimante à ticket thermique : le backend a déjà construit le flux ESC/POS
-            // (init + image raster + coupe) ; on l'écrit tel quel sur la socket brute (port 9100).
-            const bytes = Buffer.from(String(job.escposBase64 || ''), 'base64');
-            if (!bytes.length) throw new Error('Flux ESC/POS vide (escposBase64 manquant)');
-            await printEscpos(device, bytes);
-        } else if (protocol === 'zpl' || protocol === 'raw') {
-            // Imprimante Zebra (ZPL) / raw : le backend a déjà construit le flux (bitmap ZPL ^GFA).
-            // On l'écrit tel quel sur la socket brute (port 9100) — même chemin que l'ESC/POS.
-            const bytes = Buffer.from(String(job.rawBase64 || ''), 'base64');
-            if (!bytes.length) throw new Error('Flux ZPL/raw vide (rawBase64 manquant)');
-            await printEscpos(device, bytes);
-        } else {
-            const pdf = Buffer.from(String(job.pdfBase64 || ''), 'base64');
-            await printPdf(device, pdf, job.fileName || 'document.pdf', job.printOptions || {});
+/**
+ * Envoie un contenu à une imprimante, en refusant explicitement les combinaisons impossibles.
+ *
+ * C'est le correctif des « pages de caractères incompréhensibles » : quand le protocole de
+ * l'appareil n'était pas reconnu, l'ancien agent retombait sur l'impression IPP, ou écrivait un
+ * PDF tel quel sur une socket brute. L'imprimante recevait des octets qu'elle ne savait pas lire
+ * et les sortait caractère par caractère, sur des dizaines de pages. Un travail impossible doit
+ * échouer avec un message, pas gaspiller du papier.
+ */
+async function sendToPrinter(
+    device: AgentDevice,
+    payloadKind: string,
+    bytes: Buffer,
+    fileName: string,
+    printOptions: Record<string, unknown>,
+): Promise<void> {
+    const protocol = String(device?.capabilities?.['protocol'] ?? 'ipp');
+    if (!bytes.length) throw new Error(`Contenu vide pour un travail « ${payloadKind} »`);
+
+    const rawProtocols = ['escpos', 'zpl', 'raw', 'socket'];
+    if (rawProtocols.includes(protocol)) {
+        if (payloadKind === 'pdf') {
+            throw new Error(
+                `L'imprimante « ${device.host} » attend un flux ${protocol.toUpperCase()} mais a reçu un PDF. ` +
+                'Vérifiez son type dans la liste des imprimantes (elle imprimerait des pages illisibles).',
+            );
         }
-        await postJobStatus(job.jobId, 'done');
-        console.log(`[agent] impression ${job.jobId} OK.`);
-    } catch (e) {
-        console.error('[agent] impression échec :', (e as Error).message);
-        await postJobStatus(job.jobId, 'error', (e as Error).message);
+        await printEscpos(device, bytes);
+        return;
     }
+
+    if (protocol === 'ipp') {
+        if (payloadKind !== 'pdf') {
+            throw new Error(
+                `L'imprimante « ${device.host} » est en IPP mais a reçu un flux ${payloadKind.toUpperCase()}. ` +
+                'Vérifiez son type dans la liste des imprimantes.',
+            );
+        }
+        await printPdf(device, bytes, fileName || 'document.pdf', printOptions);
+        return;
+    }
+
+    throw new Error(`Protocole d'impression inconnu « ${protocol} » : travail refusé plutôt qu'imprimé au hasard.`);
 }
 
-async function handleScan(job: any): Promise<void> {
+/** Récupère le contenu d'un travail réservé. */
+async function fetchPayload(jobId: string): Promise<Buffer> {
+    const res = await fetch(`${BACKEND_URL}/api/network-agent/jobs/${jobId}/payload`, { headers: authHeaders() });
+    if (!res.ok) throw new Error(`Contenu du travail indisponible (HTTP ${res.status})`);
+    return Buffer.from(await res.arrayBuffer());
+}
+
+/** Traite un travail réservé dans la file (protocole 2). */
+async function runJob(job: any): Promise<void> {
     const device = job.device as AgentDevice;
-    const protocol = device?.capabilities?.['protocol'];
+    if (!device) {
+        await postJobStatus(job.jobId, 'error', 'Appareil introuvable côté serveur');
+        return;
+    }
     try {
-        const result = protocol === 'wsd'
-            ? await scanWsd(device, job.scanSettings || {})
-            : await scanEscl(device, job.scanSettings || {});
-        await postScanResult(job.jobId, result.buffer, result.mime, result.fileName);
+        if (job.type === 'scan') {
+            const protocol = device?.capabilities?.['protocol'];
+            const result = protocol === 'wsd'
+                ? await scanWsd(device, job.scanSettings || {})
+                : await scanEscl(device, job.scanSettings || {});
+            await postScanResult(job.jobId, result.buffer, result.mime, result.fileName);
+            return;
+        }
+        const bytes = await fetchPayload(job.jobId);
+        await sendToPrinter(device, String(job.payloadKind || 'pdf'), bytes, job.fileName, job.printOptions || {});
+        await postJobStatus(job.jobId, 'done');
+        console.log(`[agent] travail ${job.jobId} terminé.`);
     } catch (e) {
-        console.error('[agent] scan échec :', (e as Error).message);
+        console.error('[agent] travail échoué :', (e as Error).message);
         await postJobStatus(job.jobId, 'error', (e as Error).message);
     }
 }
 
-/** Sonde une imprimante par IP (« forcer la recherche ») et la remonte si elle répond. */
+/**
+ * Drain en cours, partagé entre appelants. Un `print` qui arrive pendant un drain doit obtenir le
+ * VRAI résultat : avec un simple verrou booléen, il recevait « la file va bien » et son contenu
+ * était jeté sans être imprimé ni signalé (constaté au banc d'essai contre un backend antérieur).
+ */
+let drainPromise: Promise<boolean> | null = null;
+/**
+ * Le backend expose-t-il la file d'attente ? Tant qu'il n'a pas été déployé, il pousse encore les
+ * travaux complets dans le flux temps réel : l'agent doit alors les traiter à l'ancienne, sinon
+ * plus rien ne s'imprime sur le site le temps que les deux versions se rejoignent.
+ */
+let queueAvailable = true;
+
+/**
+ * Vide la file du site, un travail à la fois.
+ *
+ * Le traitement est volontairement **séquentiel** : l'ancien agent lançait chaque travail sans
+ * attendre le précédent, alors qu'une imprimante en port brut n'accepte qu'une connexion à la
+ * fois. Un réveil arrivé pendant un traitement rejoint le drain en cours au lieu d'en lancer un
+ * second — et en obtient le vrai résultat.
+ */
+async function drainJobs(): Promise<boolean> {
+    // Backend sans file : inutile de redemander, on sait déjà qu'il faut traiter le contenu poussé.
+    if (!queueAvailable) return false;
+    if (drainPromise) return drainPromise;
+    drainPromise = runDrain().finally(() => { drainPromise = null; });
+    return drainPromise;
+}
+
+/** Boucle de traitement : réserve et traite les travaux tant qu'il y en a. */
+async function runDrain(): Promise<boolean> {
+    try {
+        for (;;) {
+            const res = await fetch(`${BACKEND_URL}/api/network-agent/jobs/next`, { headers: authHeaders() });
+            if (res.status === 404 || res.status === 501) {
+                // Backend antérieur à la file d'attente : on repasse au traitement des événements
+                // poussés. Sans ce repli, l'agent ignorerait le document reçu et le site
+                // n'imprimerait plus rien jusqu'au déploiement du backend.
+                if (queueAvailable) console.log('[agent] backend sans file d\'attente : traitement des travaux poussés.');
+                queueAvailable = false;
+                return false;
+            }
+            if (!res.ok) {
+                console.error(`[agent] file inaccessible (HTTP ${res.status}).`);
+                return true;
+            }
+            queueAvailable = true;
+            const job = await res.json().catch(() => null);
+            if (!job?.jobId) return true;
+            await runJob(job);
+        }
+    } catch (e) {
+        console.error('[agent] traitement de la file échoué :', (e as Error).message);
+        return true;
+    }
+}
+
+/**
+ * Traitement d'un travail **poussé** par un backend antérieur à la file d'attente : le contenu est
+ * embarqué dans l'événement (base64) au lieu d'être récupéré séparément. Chemin de compatibilité
+ * uniquement — il disparaîtra quand tous les sites auront un backend à jour.
+ */
+async function runPushedJob(event: any): Promise<void> {
+    const device = event.device as AgentDevice;
+    if (!device || !event.jobId) return;
+    try {
+        if (event.type === 'scan') {
+            const protocol = device?.capabilities?.['protocol'];
+            const result = protocol === 'wsd'
+                ? await scanWsd(device, event.scanSettings || {})
+                : await scanEscl(device, event.scanSettings || {});
+            await postScanResult(event.jobId, result.buffer, result.mime, result.fileName);
+            return;
+        }
+        const [kind, base64] = event.escposBase64
+            ? ['escpos', event.escposBase64]
+            : event.rawBase64
+                ? ['zpl', event.rawBase64]
+                : ['pdf', event.pdfBase64];
+        await sendToPrinter(device, kind, Buffer.from(String(base64 || ''), 'base64'),
+            event.fileName, event.printOptions || {});
+        await postJobStatus(event.jobId, 'done');
+        console.log(`[agent] travail poussé ${event.jobId} terminé.`);
+    } catch (e) {
+        console.error('[agent] travail poussé échoué :', (e as Error).message);
+        await postJobStatus(event.jobId, 'error', (e as Error).message);
+    }
+}
+
+/**
+ * Sonde une imprimante par IP : ports ouverts, identité, et langage réellement compris.
+ * L'ancienne version ne testait que l'IPP sur 631 — une imprimante en port brut ne remontait rien,
+ * ou remontait « IPP » à tort, ce qui lui faisait imprimer la requête HTTP en toutes lettres.
+ */
 async function handleProbe(job: any): Promise<void> {
     const host = String(job?.host || '').trim();
     if (!host) return;
-    const port = Number(job?.port) > 0 ? Number(job.port) : 631;
     try {
-        const device = await probeIpp(host, port);
+        const device = await probePrinterCapabilities(host);
         if (device) {
             await postDevices([device]);
-            console.log(`[agent] probe ${host}:${port} → ${device.mdnsName}`);
+            const protocol = device.capabilities?.['protocol'];
+            console.log(`[agent] sonde ${host} → ${device.mdnsName} (${protocol}, ports ${(device.capabilities?.['openPorts'] as number[] || []).join('/')})`);
         } else {
-            console.log(`[agent] probe ${host}:${port} : aucune réponse IPP.`);
+            console.log(`[agent] sonde ${host} : aucun port d'impression ouvert.`);
         }
     } catch (e) {
-        console.error('[agent] probe échec :', (e as Error).message);
+        console.error('[agent] sonde échec :', (e as Error).message);
     }
 }
 
 async function ping(): Promise<void> {
     try {
-        await fetch(`${BACKEND_URL}/api/network-agent/ping`, {
+        await fetch(`${BACKEND_URL}/api/network-agent/ping?version=${AGENT_VERSION}&protocol=${PROTOCOL_VERSION}`, {
             method: 'POST',
-            headers: { Authorization: `Bearer ${TOKEN}` },
+            headers: authHeaders(),
         });
         console.log('[agent] ping ↔ pong OK.');
     } catch (e) {
@@ -171,32 +320,42 @@ async function ping(): Promise<void> {
     }
 }
 
-async function handleJob(job: any): Promise<void> {
-    switch (job?.type) {
+/** Événements du flux temps réel : ce sont des signaux, plus des travaux. */
+async function handleEvent(event: any): Promise<void> {
+    switch (event?.type) {
         case 'ping': await ping(); break;
         case 'discover': await discover(); break;
-        case 'probe': await handleProbe(job); break;
-        case 'print': await handlePrint(job); break;
-        case 'scan': await handleScan(job); break;
-        default: console.log('[agent] event inconnu :', job);
+        case 'probe': await handleProbe(event); break;
+        // Réveil : un travail attend dans la file.
+        case 'wake':
+            await drainJobs();
+            break;
+        // Événement complet d'un backend antérieur : on tente d'abord la file (backend à jour),
+        // et à défaut on traite le contenu embarqué dans l'événement.
+        case 'print':
+        case 'scan':
+            if (!(await drainJobs())) await runPushedJob(event);
+            break;
+        default: console.log('[agent] événement inconnu :', event);
     }
 }
 
 /** Lit un flux SSE via fetch streaming (sans dépendance). */
 async function connectSse(): Promise<void> {
-    const url = `${BACKEND_URL}/api/network-agent/sse?token=${encodeURIComponent(TOKEN)}`;
+    const url = `${BACKEND_URL}/api/network-agent/sse?version=${AGENT_VERSION}&protocol=${PROTOCOL_VERSION}`;
     console.log('[agent] connexion SSE…');
-    const res = await fetch(url, { headers: { Accept: 'text/event-stream' } });
+    const res = await fetch(url, { headers: authHeaders({ Accept: 'text/event-stream' }) });
     if (!res.ok || !res.body) {
         // Remonte le message du backend (ex: « Token d'appairage invalide ») pour un diagnostic
         // immédiat des problèmes d'appairage, plutôt qu'un simple « HTTP 401 ».
         const reason = await res.text().catch(() => '');
         throw new Error(`SSE HTTP ${res.status}${reason ? ` — ${reason.slice(0, 200)}` : ''}`);
     }
-    console.log('[agent] connecté au backend.');
+    console.log(`[agent] connecté au backend (agent ${AGENT_VERSION}, protocole ${PROTOCOL_VERSION}).`);
 
-    // Découverte initiale dès la connexion.
+    // Découverte initiale, puis rattrapage des travaux laissés en attente pendant la coupure.
     void discover();
+    void drainJobs();
 
     const decoder = new TextDecoder();
     let buffer = '';
@@ -211,7 +370,7 @@ async function connectSse(): Promise<void> {
             const data = dataLine.slice(5).trim();
             if (!data) continue;
             try {
-                void handleJob(JSON.parse(data));
+                void handleEvent(JSON.parse(data));
             } catch {
                 /* keep-alive ou payload non-JSON : ignoré */
             }
@@ -220,7 +379,10 @@ async function connectSse(): Promise<void> {
 }
 
 async function main(): Promise<void> {
-    console.log(`[agent] MyStock network agent — backend ${BACKEND_URL}`);
+    console.log(`[agent] MyStock network agent ${AGENT_VERSION} — backend ${BACKEND_URL}`);
+    // Filet : même sans réveil (flux coupé, événement perdu), la file finit par être traitée.
+    setInterval(() => { void drainJobs(); }, POLL_MS);
+
     for (;;) {
         try {
             await connectSse();

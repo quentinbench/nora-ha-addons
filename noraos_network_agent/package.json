@@ -1,8 +1,8 @@
 {
     "name": "mystock-network-agent",
-    "version": "0.3.0",
+    "version": "0.4.3",
     "private": true,
-    "description": "Agent local MyStock — impression IPP et scan eSCL sur le LAN d'un site, relié au backend par SSE sortant.",
+    "description": "Agent local MyStock — impression IPP/ZPL/ESC-POS et scan eSCL/WSD sur le LAN d'un site. File d'attente tirée depuis le backend (protocole 2).",
     "main": "dist/agent.js",
     "scripts": {
         "build": "tsc -p tsconfig.json",

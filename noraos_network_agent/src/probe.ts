@@ -3,6 +3,7 @@
 const ipp = require('ipp');
 
 import { DiscoveredDevice } from './types';
+import { identifyRawLanguage, openPrintPorts } from './identify';
 
 /** Première valeur exploitable d'un attribut IPP (les valeurs sont parfois des tableaux). */
 function attr(obj: Record<string, unknown> | undefined, key: string): string | undefined {
@@ -33,6 +34,10 @@ export function probeIpp(host: string, port = 631): Promise<DiscoveredDevice | n
                     const pa = res?.['printer-attributes-tag'] as Record<string, unknown> | undefined;
                     const name = attr(pa, 'printer-make-and-model') || attr(pa, 'printer-name') || `Imprimante (${host})`;
                     const location = attr(pa, 'printer-location');
+                    // Formats acceptés : c'est cette liste qui dit si l'imprimante sait lire un PDF.
+                    // Une IPP qui ne l'annonce pas sort des pages BLANCHES en déclarant le travail
+                    // réussi — il faut alors lui envoyer un raster, pas le PDF.
+                    const formats = pa?.['document-format-supported'];
                     done({
                         kind: 'printer',
                         mdnsName: name,
@@ -40,7 +45,13 @@ export function probeIpp(host: string, port = 631): Promise<DiscoveredDevice | n
                         port,
                         uuid: `ipp:${host}:${port}`,
                         txt: location ? { note: location } : {},
-                        capabilities: { protocol: 'ipp', ippUri, manual: true },
+                        capabilities: {
+                            protocol: 'ipp',
+                            ippUri,
+                            manual: true,
+                            model: attr(pa, 'printer-make-and-model'),
+                            ippFormats: Array.isArray(formats) ? formats.map(String) : (formats ? [String(formats)] : undefined),
+                        },
                     });
                 },
             );
@@ -49,4 +60,50 @@ export function probeIpp(host: string, port = 631): Promise<DiscoveredDevice | n
             done(null);
         }
     });
+}
+
+
+/**
+ * Sonde complète d'une imprimante par son adresse : quels ports répondent, et **quel langage**
+ * l'imprimante comprend.
+ *
+ * Le port seul ne suffit pas à décider : ZPL et ESC/POS écoutent tous les deux le 9100. Et une
+ * imprimante déclarée en IPP alors qu'elle est sur un port brut imprime la requête HTTP en toutes
+ * lettres. On teste donc les ports, puis on interroge l'imprimante elle-même.
+ */
+export async function probePrinterCapabilities(host: string): Promise<DiscoveredDevice | null> {
+    const ports = await openPrintPorts(host);
+    if (!ports.length) return null;
+
+    // IPP d'abord : c'est le seul protocole qui sait décliner son identité et ses formats.
+    if (ports.includes(631)) {
+        const device = await probeIpp(host, 631);
+        if (device) {
+            (device.capabilities as Record<string, unknown>).openPorts = ports;
+            return device;
+        }
+    }
+
+    if (ports.includes(9100)) {
+        const { language, model } = await identifyRawLanguage(host, 9100);
+        return {
+            kind: 'printer',
+            mdnsName: model || `Imprimante réseau ${host}`,
+            host,
+            port: 9100,
+            uuid: `socket:${host}:9100`,
+            txt: {},
+            capabilities: {
+                // Sans réponse de l'imprimante on reste sur « socket » : on ne devine pas un langage,
+                // au risque d'envoyer du ZPL à une imprimante à ticket (ou l'inverse).
+                protocol: language ?? 'socket',
+                socketPort: 9100,
+                raw: true,
+                model,
+                rawLanguage: language,
+                openPorts: ports,
+            },
+        };
+    }
+    return null;
 }
