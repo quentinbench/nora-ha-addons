@@ -1,5 +1,38 @@
 # Changelog — NoraOS Network Agent
 
+## 0.7.0
+- 📐 **Unité du compteur de pages relevée** (`prtMarkerCounterUnit`, RFC 3805). Une imprimante
+  compte soit des **faces imprimées**, soit des **feuilles** — et ne dit pas laquelle sans qu'on le
+  lui demande. Prendre l'une pour l'autre double le coût papier annoncé sur une machine qui
+  imprime en recto-verso. L'unité est désormais remontée avec le compteur, et MyStock refuse de
+  chiffrer le papier quand le compteur n'est pas un compteur de pages (traceurs, étiqueteuses au
+  mètre).
+
+## 0.6.0
+- 🚨 **État de la machine remonté** : bourrage papier, capot ouvert, plus de papier, plus de toner,
+  intervention requise… L'imprimante déclare elle-même ses anomalies ; MyStock peut donc prévenir
+  **avant** que quelqu'un ne vienne signaler que « ça n'imprime plus ».
+- 📄 **Niveau des bacs papier**, quand la machine le chiffre. Beaucoup d'imprimantes se contentent de
+  répondre « il en reste » : dans ce cas on n'affiche rien plutôt qu'une valeur trompeuse, et
+  l'alerte papier vient de l'état déclaré.
+- 🔐 **Communauté SNMP paramétrable** (option `snmp_community` de l'add-on, variable
+  `SNMP_COMMUNITY`, ou valeur imposée par MyStock). Elle était figée à « public » : une imprimante
+  configurée autrement restait muette sans qu'on comprenne pourquoi.
+## 0.5.0
+- 📊 **Compteurs et niveaux de consommables** relevés sur les imprimantes en **SNMP** : nombre de pages
+  imprimées, niveau de toner, de tambour, de four, de courroie et du bac de récupération. Remontés à
+  MyStock à chaque découverte, pour commander **avant** la panne au lieu de découvrir le problème
+  quand l'imprimante s'arrête.
+- 🏷️ Le **modèle et le numéro de série** relevés sur la machine alimentent aussi la reconnaissance
+  automatique du protocole d'impression.
+- 🔎 Lecture par la **MIB imprimante standard (RFC 3805)**, commune à toutes les marques. Complétée
+  pour les Brother, qui ne chiffrent pas leur niveau de toner dans la norme (elles répondent
+  « il en reste ») et le publient dans leur propre MIB.
+## 0.4.4
+- 🔁 **Scan long compté deux fois** : un scan avec chargeur automatique dépasse la durée de réservation
+  d'un travail. Le serveur croyait l'agent disparu et remettait le travail en file — le document
+  repartait au scanner une seconde fois. L'agent signale désormais qu'il est toujours à l'œuvre.
+
 ## 0.4.3
 - 🐛 **Travail poussé jeté pendant un traitement en cours** : quand un travail arrivait alors que
   l'agent interrogeait déjà la file, il recevait « la file va bien » et son contenu était abandonné

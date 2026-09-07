@@ -4,7 +4,7 @@ name: NoraOS Network Agent
 # ⚠️ Home Assistant ne propose une mise à jour de l'add-on QUE si ce numéro change.
 # À INCRÉMENTER à chaque évolution du code agent (sinon les sites restent sur une vieille build :
 # ex. le support Zebra ZPL / ESC/POS / scan multi-pages n'était jamais arrivé sur site car figé en 0.1.0).
-version: "0.4.3"
+version: "0.7.1"
 # ⚠️ Le slug pilote le dossier de l'add-on dans le dépôt (`<slug>/`) ET son identité côté HA.
 # Le renommer = NOUVEL add-on pour HA : toute install existante devient orpheline et doit être
 # réinstallée (+ ressaisie du token). Ne le change donc qu'en connaissance de cause.
@@ -23,8 +23,10 @@ init: false
 boot: auto
 startup: application
 options:
+  snmp_community: "public"
   backend_url: ""
   pairing_token: ""
 schema:
+  snmp_community: "str?"
   backend_url: str
   pairing_token: str

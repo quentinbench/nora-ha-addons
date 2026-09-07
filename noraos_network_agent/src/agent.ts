@@ -23,36 +23,60 @@ import * as fs from 'fs';
 
 import { discoverAll } from './discovery';
 import { probePrinterCapabilities } from './probe';
+import { readPrinterMetrics } from './snmp';
 import { printPdf } from './print-ipp';
 import { printEscpos } from './print-escpos';
 import { scanEscl } from './scan-escl';
 import { scanWsd } from './scan-wsd';
-import { AgentDevice } from './types';
+import { AgentDevice, DiscoveredDevice } from './types';
 
 /** Version du protocole parlé avec le backend (annoncée à la connexion). */
 const PROTOCOL_VERSION = 2;
 
-/** Version de l'agent — DOIT suivre `config.yaml`, sinon Home Assistant ne propose pas la mise à jour. */
-const AGENT_VERSION = '0.4.3';
+/**
+ * Version de l'agent, **lue dans `package.json`** — plus recopiée à la main.
+ *
+ * La constante avait dérivé : elle annonçait 0.6.0 alors que l'agent publié était en 0.7.0. Or
+ * c'est précisément cette version que MyStock affiche pour repérer un agent resté en arrière —
+ * l'information construite après qu'une build d'agent périmée eut fait échouer toutes les
+ * étiquettes d'un site pendant des semaines. Une version fausse rend ce garde-fou inutile.
+ *
+ * `package.json` est le seul fichier présent aussi bien en développement (`ts-node src/`) que
+ * dans l'image (le Dockerfile le copie à côté de `dist/`). Il doit rester aligné avec la version
+ * de `config.yaml`, qui pilote la mise à jour de l'add-on Home Assistant.
+ */
+const AGENT_VERSION: string = (() => {
+    try {
+        return String(JSON.parse(fs.readFileSync(`${__dirname}/../package.json`, 'utf8')).version || 'inconnue');
+    } catch {
+        return 'inconnue';
+    }
+})();
 
 /**
  * Config : variables d'environnement (déploiement Docker standalone) OU options de l'add-on
  * Home Assistant (`/data/options.json` : backend_url / pairing_token).
  */
-function loadConfig(): { backendUrl: string; token: string } {
+function loadConfig(): { backendUrl: string; token: string; snmpCommunity: string } {
     let backendUrl = process.env.BACKEND_URL || '';
     let token = process.env.PAIRING_TOKEN || '';
-    if (!backendUrl || !token) {
+    // Communauté SNMP du site : « public » convient à la plupart des parcs, mais une imprimante
+    // configurée autrement resterait muette sans qu'on comprenne pourquoi.
+    let snmpCommunity = process.env.SNMP_COMMUNITY || '';
+    if (!backendUrl || !token || !snmpCommunity) {
         try {
             const opts = JSON.parse(fs.readFileSync('/data/options.json', 'utf8'));
             backendUrl = backendUrl || opts.backend_url || '';
             token = token || opts.pairing_token || '';
+            snmpCommunity = snmpCommunity || opts.snmp_community || '';
         } catch {/* pas en add-on HA */}
     }
-    return { backendUrl: backendUrl.replace(/\/+$/, ''), token };
+    return { backendUrl: backendUrl.replace(/\/+$/, ''), token, snmpCommunity: snmpCommunity || 'public' };
 }
 
-const { backendUrl: BACKEND_URL, token: TOKEN } = loadConfig();
+const { backendUrl: BACKEND_URL, token: TOKEN, snmpCommunity: DEFAULT_SNMP_COMMUNITY } = loadConfig();
+/** Communauté effective : celle du site, ou celle imposée par MyStock lors d'une découverte. */
+let snmpCommunity = DEFAULT_SNMP_COMMUNITY;
 const RECONNECT_MS = 3000;
 const DISCOVERY_MS = Number(process.env.DISCOVERY_MS) || 4000;
 /** Filet de sécurité : on repasse prendre le travail même si aucun réveil n'est arrivé. */
@@ -110,13 +134,44 @@ async function postScanResult(jobId: string, buffer: Buffer, mime: string, fileN
     }
 }
 
-async function discover(): Promise<void> {
+async function discover(options: { snmpCommunity?: string } = {}): Promise<void> {
+    if (options.snmpCommunity) snmpCommunity = options.snmpCommunity;
     try {
         const devices = await discoverAll(DISCOVERY_MS);
+        await enrichWithSupplies(devices);
         await postDevices(devices);
     } catch (e) {
         console.error('[agent] découverte échec :', (e as Error).message);
     }
+}
+
+/**
+ * Relève, pour chaque imprimante trouvée, son compteur de pages et ses niveaux de consommables.
+ *
+ * C'est ce qui permet de commander un tambour **avant** qu'il ne soit vide, au lieu d'apprendre le
+ * problème quand quelqu'un vient dire que l'imprimante ne marche plus. Interrogation en SNMP, le
+ * seul canal commun à toutes les marques ; une imprimante qui n'y répond pas est simplement passée.
+ */
+async function enrichWithSupplies(devices: DiscoveredDevice[]): Promise<void> {
+    const printers = devices.filter((d) => d.kind === 'printer');
+    const CONCURRENCY = 6;
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+        while (cursor < printers.length) {
+            const device = printers[cursor++];
+            const metrics = await readPrinterMetrics(device.host, { community: snmpCommunity }).catch(() => null);
+            if (!metrics) continue;
+            device.pageCount = metrics.pageCount;
+            // Ce que compte réellement le compteur : sans cette unité, des faces imprimées
+            // passeraient pour des feuilles et le coût papier serait faux en recto-verso.
+            device.pageCountUnit = metrics.pageCountUnit;
+            device.supplies = metrics.supplies;
+            if (metrics.model && !device.mdnsName) device.mdnsName = metrics.model;
+            // Le modèle relevé alimente aussi la reconnaissance automatique du protocole.
+            device.capabilities = { ...(device.capabilities ?? {}), model: metrics.model, serialNumber: metrics.serialNumber };
+        }
+    };
+    await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
 }
 
 /**
@@ -171,6 +226,20 @@ async function fetchPayload(jobId: string): Promise<Buffer> {
     return Buffer.from(await res.arrayBuffer());
 }
 
+/**
+ * Prolonge la réservation d'un travail tant qu'il dure. Un scan avec chargeur automatique dépasse
+ * facilement la durée de réservation : sans ce signal, le serveur croirait l'agent disparu et
+ * remettrait le travail en file — le document serait scanné deux fois.
+ */
+function keepJobAlive(jobId: string): () => void {
+    const timer = setInterval(() => {
+        void fetch(`${BACKEND_URL}/api/network-agent/jobs/${jobId}/heartbeat`, {
+            method: 'POST', headers: authHeaders(),
+        }).catch(() => undefined);
+    }, 45000);
+    return () => clearInterval(timer);
+}
+
 /** Traite un travail réservé dans la file (protocole 2). */
 async function runJob(job: any): Promise<void> {
     const device = job.device as AgentDevice;
@@ -178,6 +247,7 @@ async function runJob(job: any): Promise<void> {
         await postJobStatus(job.jobId, 'error', 'Appareil introuvable côté serveur');
         return;
     }
+    const stopKeepAlive = keepJobAlive(job.jobId);
     try {
         if (job.type === 'scan') {
             const protocol = device?.capabilities?.['protocol'];
@@ -194,6 +264,8 @@ async function runJob(job: any): Promise<void> {
     } catch (e) {
         console.error('[agent] travail échoué :', (e as Error).message);
         await postJobStatus(job.jobId, 'error', (e as Error).message);
+    } finally {
+        stopKeepAlive();
     }
 }
 
@@ -324,7 +396,7 @@ async function ping(): Promise<void> {
 async function handleEvent(event: any): Promise<void> {
     switch (event?.type) {
         case 'ping': await ping(); break;
-        case 'discover': await discover(); break;
+        case 'discover': await discover({ snmpCommunity: event?.snmpCommunity }); break;
         case 'probe': await handleProbe(event); break;
         // Réveil : un travail attend dans la file.
         case 'wake':
