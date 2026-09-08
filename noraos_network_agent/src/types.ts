@@ -21,6 +21,8 @@ export interface DiscoveredDevice {
 /** Device tel que renvoyé par le backend dans un job (cf. deviceForAgent). */
 export interface AgentDevice {
     id: string;
+    /** Nom donné à l'appareil dans MyStock. Absent tant que le backend du site n'est pas à jour. */
+    name?: string;
     kind: DeviceKind;
     host: string;
     port: number;

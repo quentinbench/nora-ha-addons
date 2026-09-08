@@ -92,9 +92,34 @@ function authHeaders(extra: Record<string, string> = {}): Record<string, string>
     return { Authorization: `Bearer ${TOKEN}`, ...extra };
 }
 
+/**
+ * Durée maximale d'un appel court au backend.
+ *
+ * Sans borne, `fetch` peut attendre **indéfiniment** sur une connexion à moitié morte (NAT qui
+ * oublie la session, proxy qui ne répond plus) : le dépilement de la file s'est déjà figé une
+ * journée entière de cette façon — en silence, sans exception, donc sans une ligne de journal —
+ * pendant que le flux temps réel, qui est un autre chemin de code, continuait de répondre. Le
+ * site apparaissait EN LIGNE dans MyStock et n'imprimait plus rien.
+ */
+const BACKEND_TIMEOUT_MS = 30_000;
+
+/** Transferts de contenu (téléchargement d'un document, envoi d'un scan de plusieurs pages) :
+ *  même garde-fou, borne plus large parce que ça pèse parfois quelques mégaoctets. */
+const TRANSFER_TIMEOUT_MS = 180_000;
+
+/**
+ * `fetch` vers le backend, borné dans le temps.
+ *
+ * ⚠️ Réservé aux appels COURTS. Le flux SSE est délibérément laissé sans borne : c'est une
+ * connexion longue durée, l'abandonner au bout de 30 s la couperait en permanence.
+ */
+function backendFetch(path: string, init: RequestInit = {}, timeoutMs = BACKEND_TIMEOUT_MS): Promise<Response> {
+    return fetch(`${BACKEND_URL}${path}`, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+}
+
 async function postDevices(devices: unknown[]): Promise<void> {
     try {
-        await fetch(`${BACKEND_URL}/api/network-agent/devices`, {
+        await backendFetch('/api/network-agent/devices', {
             method: 'POST',
             headers: authHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ devices }),
@@ -107,7 +132,7 @@ async function postDevices(devices: unknown[]): Promise<void> {
 
 async function postJobStatus(jobId: string, status: 'done' | 'error', error?: string): Promise<void> {
     try {
-        await fetch(`${BACKEND_URL}/api/network-agent/jobs/${jobId}/result`, {
+        await backendFetch(`/api/network-agent/jobs/${jobId}/result`, {
             method: 'POST',
             headers: authHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ status, error }),
@@ -122,11 +147,11 @@ async function postScanResult(jobId: string, buffer: Buffer, mime: string, fileN
     fd.append('status', 'done');
     fd.append('files', new Blob([new Uint8Array(buffer)], { type: mime }), fileName);
     try {
-        await fetch(`${BACKEND_URL}/api/network-agent/jobs/${jobId}/result`, {
+        await backendFetch(`/api/network-agent/jobs/${jobId}/result`, {
             method: 'POST',
             headers: authHeaders(),
             body: fd,
-        });
+        }, TRANSFER_TIMEOUT_MS);
         console.log(`[agent] scan ${jobId} envoyé (${buffer.length} octets).`);
     } catch (e) {
         console.error('[agent] POST scan result échec :', (e as Error).message);
@@ -221,7 +246,7 @@ async function sendToPrinter(
 
 /** Récupère le contenu d'un travail réservé. */
 async function fetchPayload(jobId: string): Promise<Buffer> {
-    const res = await fetch(`${BACKEND_URL}/api/network-agent/jobs/${jobId}/payload`, { headers: authHeaders() });
+    const res = await backendFetch(`/api/network-agent/jobs/${jobId}/payload`, { headers: authHeaders() }, TRANSFER_TIMEOUT_MS);
     if (!res.ok) throw new Error(`Contenu du travail indisponible (HTTP ${res.status})`);
     return Buffer.from(await res.arrayBuffer());
 }
@@ -233,17 +258,30 @@ async function fetchPayload(jobId: string): Promise<Buffer> {
  */
 function keepJobAlive(jobId: string): () => void {
     const timer = setInterval(() => {
-        void fetch(`${BACKEND_URL}/api/network-agent/jobs/${jobId}/heartbeat`, {
+        void backendFetch(`/api/network-agent/jobs/${jobId}/heartbeat`, {
             method: 'POST', headers: authHeaders(),
-        }).catch(() => undefined);
+        }, 15_000).catch(() => undefined);
     }, 45000);
     return () => clearInterval(timer);
+}
+
+/**
+ * Étiquette lisible d'un appareil pour les journaux : « Zebra Packing 1 (192.168.0.226:9100) ».
+ *
+ * Les échecs ne nommaient ni le travail ni la machine visée : le journal disait « travail échoué :
+ * Timeout IPP » sans dire laquelle des six imprimantes du site avait bloqué, et il fallait sonder
+ * le parc à la main pour le deviner.
+ */
+function deviceLabel(device?: AgentDevice): string {
+    if (!device) return 'appareil inconnu';
+    return `${device.name || device.host || 'appareil'} (${device.host}:${device.port})`;
 }
 
 /** Traite un travail réservé dans la file (protocole 2). */
 async function runJob(job: any): Promise<void> {
     const device = job.device as AgentDevice;
     if (!device) {
+        console.error(`[agent] travail ${job.jobId} refusé : appareil introuvable côté serveur.`);
         await postJobStatus(job.jobId, 'error', 'Appareil introuvable côté serveur');
         return;
     }
@@ -260,9 +298,9 @@ async function runJob(job: any): Promise<void> {
         const bytes = await fetchPayload(job.jobId);
         await sendToPrinter(device, String(job.payloadKind || 'pdf'), bytes, job.fileName, job.printOptions || {});
         await postJobStatus(job.jobId, 'done');
-        console.log(`[agent] travail ${job.jobId} terminé.`);
+        console.log(`[agent] travail ${job.jobId} terminé sur ${deviceLabel(device)}.`);
     } catch (e) {
-        console.error('[agent] travail échoué :', (e as Error).message);
+        console.error(`[agent] travail ${job.jobId} échoué sur ${deviceLabel(device)} : ${(e as Error).message}`);
         await postJobStatus(job.jobId, 'error', (e as Error).message);
     } finally {
         stopKeepAlive();
@@ -275,6 +313,17 @@ async function runJob(job: any): Promise<void> {
  * était jeté sans être imprimé ni signalé (constaté au banc d'essai contre un backend antérieur).
  */
 let drainPromise: Promise<boolean> | null = null;
+/** Heure de départ de la passe en cours — sert au chien de garde ci-dessous. */
+let drainStartedAt = 0;
+/**
+ * Au-delà de cette durée, une passe de dépilement est considérée perdue.
+ *
+ * Généreux à dessein : un scan de chargeur bien rempli dure plusieurs minutes, et déclarer perdue
+ * une passe qui travaille encore ferait imprimer deux fois. Les bornes de temps sur chaque appel
+ * réseau font le gros du travail ; ce chien de garde n'est là que pour ce qu'elles ne couvrent
+ * pas (une passe qui n'aboutit pas pour une raison qu'on n'a pas prévue).
+ */
+const DRAIN_WATCHDOG_MS = 15 * 60_000;
 /**
  * Le backend expose-t-il la file d'attente ? Tant qu'il n'a pas été déployé, il pousse encore les
  * travaux complets dans le flux temps réel : l'agent doit alors les traiter à l'ancienne, sinon
@@ -293,16 +342,26 @@ let queueAvailable = true;
 async function drainJobs(): Promise<boolean> {
     // Backend sans file : inutile de redemander, on sait déjà qu'il faut traiter le contenu poussé.
     if (!queueAvailable) return false;
-    if (drainPromise) return drainPromise;
-    drainPromise = runDrain().finally(() => { drainPromise = null; });
-    return drainPromise;
+    if (drainPromise) {
+        if (Date.now() - drainStartedAt < DRAIN_WATCHDOG_MS) return drainPromise;
+        // Passe qui ne se termine plus : on la laisse tomber et on en relance une propre. Sans ce
+        // garde-fou, une seule passe bloquée gelait le dépilement pour toute la vie du process —
+        // seul un redémarrage de l'add-on remettait le site à imprimer.
+        const minutes = Math.round((Date.now() - drainStartedAt) / 60_000);
+        console.error(`[agent] dépilement bloqué depuis ${minutes} min : on repart sur une passe neuve.`);
+        drainPromise = null;
+    }
+    drainStartedAt = Date.now();
+    const started = runDrain().finally(() => { if (drainPromise === started) drainPromise = null; });
+    drainPromise = started;
+    return started;
 }
 
 /** Boucle de traitement : réserve et traite les travaux tant qu'il y en a. */
 async function runDrain(): Promise<boolean> {
     try {
         for (;;) {
-            const res = await fetch(`${BACKEND_URL}/api/network-agent/jobs/next`, { headers: authHeaders() });
+            const res = await backendFetch('/api/network-agent/jobs/next', { headers: authHeaders() });
             if (res.status === 404 || res.status === 501) {
                 // Backend antérieur à la file d'attente : on repasse au traitement des événements
                 // poussés. Sans ce repli, l'agent ignorerait le document reçu et le site
@@ -382,7 +441,7 @@ async function handleProbe(job: any): Promise<void> {
 
 async function ping(): Promise<void> {
     try {
-        await fetch(`${BACKEND_URL}/api/network-agent/ping?version=${AGENT_VERSION}&protocol=${PROTOCOL_VERSION}`, {
+        await backendFetch(`/api/network-agent/ping?version=${AGENT_VERSION}&protocol=${PROTOCOL_VERSION}`, {
             method: 'POST',
             headers: authHeaders(),
         });
@@ -450,8 +509,31 @@ async function connectSse(): Promise<void> {
     }
 }
 
+/**
+ * Arrêt propre.
+ *
+ * Sans écouteur, le conteneur sortait **systématiquement en code 137** : Docker envoyait SIGTERM,
+ * personne ne l'écoutait, et le noyau tuait le process dix secondes plus tard. Un travail en cours
+ * partait avec, sans statut : côté serveur il restait « en cours » jusqu'à expiration de son bail.
+ * On laisse donc une courte fenêtre à la passe en cours pour se terminer et poster son résultat.
+ */
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    if (drainPromise) {
+        console.log(`[agent] ${signal} reçu — un travail est en cours, on lui laisse 5 s pour finir.`);
+        await Promise.race([drainPromise, new Promise((r) => setTimeout(r, 5_000))]);
+    } else {
+        console.log(`[agent] ${signal} reçu — arrêt.`);
+    }
+    process.exit(0);
+}
+
 async function main(): Promise<void> {
     console.log(`[agent] MyStock network agent ${AGENT_VERSION} — backend ${BACKEND_URL}`);
+    process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+    process.on('SIGINT', () => { void shutdown('SIGINT'); });
     // Filet : même sans réveil (flux coupé, événement perdu), la file finit par être traitée.
     setInterval(() => { void drainJobs(); }, POLL_MS);
 

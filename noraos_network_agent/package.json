@@ -1,6 +1,6 @@
 {
     "name": "mystock-network-agent",
-    "version": "0.7.1",
+    "version": "0.8.0",
     "private": true,
     "description": "Agent local MyStock — impression IPP/ZPL/ESC-POS et scan eSCL/WSD sur le LAN d'un site. File d'attente tirée depuis le backend (protocole 2).",
     "main": "dist/agent.js",

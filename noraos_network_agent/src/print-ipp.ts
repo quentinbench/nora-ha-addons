@@ -78,6 +78,82 @@ function runOk(cmd: string, args: string[]): Promise<boolean> {
     });
 }
 
+/**
+ * Motifs d'état IPP (RFC 8011) traduits en langage d'atelier.
+ *
+ * Les suffixes `-error` / `-warning` / `-report` sont retirés avant la recherche : une même cause
+ * est publiée avec l'un ou l'autre selon la marque et la gravité.
+ */
+const STATE_REASONS: Record<string, string> = {
+    'media-jam': 'bourrage papier',
+    'media-empty': 'plus de papier',
+    'media-needed': 'papier à recharger',
+    'media-low': 'bac presque vide',
+    'input-tray-missing': 'bac d\'alimentation absent',
+    'cover-open': 'capot ouvert',
+    'door-open': 'porte ouverte',
+    'interlock-open': 'capot mal fermé',
+    'toner-empty': 'toner vide',
+    'toner-low': 'toner presque vide',
+    'marker-supply-empty': 'consommable vide',
+    'marker-supply-low': 'consommable presque vide',
+    'marker-waste-full': 'bac de récupération plein',
+    'developer-empty': 'révélateur vide',
+    'opc-life-over': 'tambour en fin de vie',
+    'opc-near-eol': 'tambour bientôt en fin de vie',
+    'fuser-over-temp': 'four en surchauffe',
+    'fuser-under-temp': 'four trop froid',
+    'output-area-full': 'bac de sortie plein',
+    'output-area-almost-full': 'bac de sortie presque plein',
+    'offline': 'imprimante hors ligne',
+    'paused': 'imprimante en pause',
+    'shutdown': 'imprimante éteinte',
+    'spool-area-full': 'file interne de l\'imprimante pleine',
+    'other': 'anomalie signalée par l\'imprimante',
+};
+
+/**
+ * Demande à l'imprimante **ce qui ne va pas**, et le dit en français.
+ *
+ * Une imprimante bourrée ACCEPTE le travail IPP puis ne le termine jamais : MyStock n'affichait
+ * qu'un « Timeout IPP — imprimante injoignable/bloquée », alors que la machine publie le motif
+ * exact dans `printer-state-reasons`. Il fallait aller voir l'imprimante pour comprendre. Constaté
+ * en vrai le 07/09 : deux HL-L2350DW, l'une bourrée, l'autre sans papier, toutes deux
+ * `accepting-jobs: true` — donc silencieuses côté protocole.
+ *
+ * Ne lève jamais : c'est un enrichissement de message d'erreur, il ne doit pas masquer la panne
+ * d'origine ni allonger l'échec quand l'imprimante ne répond plus du tout.
+ */
+export function describePrinterTrouble(device: AgentDevice, timeoutMs = 8_000): Promise<string | null> {
+    return new Promise((resolve) => {
+        let done = false;
+        const finish = (value: string | null): void => { if (!done) { done = true; resolve(value); } };
+        const timer = setTimeout(() => finish(null), timeoutMs);
+        try {
+            ipp.Printer(ippUri(device)).execute(
+                'Get-Printer-Attributes',
+                { 'operation-attributes-tag': { 'requesting-user-name': 'mystock' } },
+                (err: any, res: any) => {
+                    clearTimeout(timer);
+                    if (err) return finish(null);
+                    const attrs = res?.['printer-attributes-tag'] || {};
+                    const reasons = ([] as unknown[]).concat(attrs['printer-state-reasons'] || [])
+                        .map((r) => String(r).replace(/-(report|warning|error)$/, ''))
+                        .filter((r) => r && r !== 'none');
+                    const labels = Array.from(new Set(reasons.map((r) => STATE_REASONS[r]).filter(Boolean)));
+                    if (labels.length) return finish(labels.join(', '));
+                    // Aucun motif nommé : l'état brut vaut mieux que rien.
+                    if (Number(attrs['printer-state']) === 5) return finish('imprimante arrêtée');
+                    finish(null);
+                },
+            );
+        } catch {
+            clearTimeout(timer);
+            finish(null);
+        }
+    });
+}
+
 /** Un seul essai de Print-Job avec un `document-format` et des données donnés. */
 function printJobOnce(
     device: AgentDevice,
@@ -143,6 +219,19 @@ function printJobOnce(
  * historique inchangée : `application/pdf` → repli `application/octet-stream`.
  */
 export async function printPdf(device: AgentDevice, pdf: Buffer, fileName: string, options: PrintOptions = {}): Promise<void> {
+    try {
+        await dispatchPdf(device, pdf, fileName, options);
+    } catch (e) {
+        // L'imprimante sait pourquoi elle n'imprime pas : on le lui demande avant de remonter
+        // l'échec, pour que la file d'attente affiche « bourrage papier » et pas « injoignable ».
+        const trouble = await describePrinterTrouble(device);
+        if (!trouble) throw e;
+        throw new Error(`L'imprimante signale : ${trouble}. (${(e as Error).message})`);
+    }
+}
+
+/** Choix du format d'envoi (raster opt-in, sinon cascade historique). */
+async function dispatchPdf(device: AgentDevice, pdf: Buffer, fileName: string, options: PrintOptions): Promise<void> {
     const forceRaster = device.capabilities?.['rasterize'] === true;
     if (forceRaster) {
         const pwg = await rasterizePdfToPwg(pdf);

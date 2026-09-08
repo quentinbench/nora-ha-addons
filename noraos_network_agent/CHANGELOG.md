@@ -1,5 +1,27 @@
 # Changelog — NoraOS Network Agent
 
+## 0.8.0
+- 🩺 **Une panne d'impression ne peut plus passer inaperçue.** Chaque appel au serveur est
+  désormais borné dans le temps, et une passe de traitement qui ne se termine pas est
+  abandonnée au profit d'une neuve. Une seule requête restée en suspens suffisait à figer le
+  dépilement de la file **pour toute la durée de vie de l'agent** : le site apparaissait en ligne,
+  répondait aux tests, et n'imprimait plus rien jusqu'au redémarrage de l'add-on.
+- 🖨️ **L'imprimante dit enfin ce qui ne va pas.** « Bourrage papier », « plus de papier »,
+  « capot ouvert », « toner vide »… au lieu de « imprimante injoignable/bloquée ». Une machine
+  bourrée accepte le travail puis ne le termine jamais : le motif exact, qu'elle publiait déjà,
+  est maintenant lu et affiché.
+- 📄 **Le scanner aussi.** Son état est consulté avant de lancer le travail : « le chargeur est
+  vide — placez le document dans le bac » remplace un « HTTP 500 » incompréhensible.
+- 🔎 **Journal exploitable** : les échecs nomment le travail et la machine visée (« travail 6a9e…
+  échoué sur Zebra Packing 1 (192.168.0.226:9100) »). Il fallait jusqu'ici sonder le parc à la
+  main pour deviner laquelle des six imprimantes avait bloqué.
+- 🛑 **Arrêt propre** : l'agent écoute l'ordre d'arrêt et laisse au travail en cours le temps de
+  poster son résultat. Il était jusqu'ici tué de force après dix secondes, et le travail en vol
+  restait « en cours » côté serveur jusqu'à expiration de sa réservation.
+
+## 0.7.1
+- 🔢 Alignement du numéro de version (le code embarqué avait changé sans que la version suive).
+
 ## 0.7.0
 - 📐 **Unité du compteur de pages relevée** (`prtMarkerCounterUnit`, RFC 3805). Une imprimante
   compte soit des **faces imprimées**, soit des **feuilles** — et ne dit pas laquelle sans qu'on le
