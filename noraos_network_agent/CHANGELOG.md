@@ -1,5 +1,14 @@
 # Changelog — NoraOS Network Agent
 
+## 0.9.1
+- 🖨️ **Impression enfin correcte sur les imprimantes récentes.** Certaines imprimantes (Brother
+  HL-L2445DW, HL-L2865DW, MFC-L2710DW…) n'acceptent qu'une **résolution précise** et sortaient des
+  **pages blanches en boucle**. L'agent adapte désormais la résolution de rastérisation à ce que
+  l'imprimante réclame (600 dpi pour ces modèles) au lieu d'une valeur figée à 300.
+- 🔒 **Imprimantes en connexion sécurisée (IPPS).** Les imprimantes du réseau local présentant un
+  **certificat auto-signé** sont désormais acceptées ; l'impression échouait avant avec
+  « certificat auto-signé ».
+
 ## 0.8.0
 - 🩺 **Une panne d'impression ne peut plus passer inaperçue.** Chaque appel au serveur est
   désormais borné dans le temps, et une passe de traitement qui ne se termine pas est
