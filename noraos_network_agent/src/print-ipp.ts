@@ -19,6 +19,16 @@ function ippUri(device: AgentDevice): string {
     return `${scheme}://${device.host}:${port}/${rp}`;
 }
 
+/**
+ * Client IPP. En IPPS (TLS), on **accepte les certificats auto-signés** : les imprimantes du LAN
+ * présentent presque toujours un certificat auto-signé, que la validation TLS par défaut rejette
+ * (« self-signed certificate ») — l'impression échoue alors qu'on est sur le réseau local de
+ * confiance. Sans effet en IPP simple (HTTP).
+ */
+function ippPrinter(device: AgentDevice): any {
+    return ipp.Printer(ippUri(device), { rejectUnauthorized: false });
+}
+
 /** Options d'impression IPP (recto/verso, couleur). */
 export interface PrintOptions {
     /** true = recto/verso (two-sided-long-edge), false = recto (one-sided). */
@@ -46,15 +56,20 @@ const PRINT_TIMEOUT_MS = 90_000;
  *
  * Retourne le flux PWG-Raster, ou `null` si mutool est absent/échoue (l'appelant retombe alors sur
  * l'ancien envoi brut, pour ne jamais être *pire* qu'avant).
+ *
+ * ⚠️ La **résolution doit correspondre à `pwg-raster-document-resolution-supported`** de
+ * l'imprimante. Certains modèles n'acceptent QU'UNE résolution (ex. Brother HL-L2445DW = 600 dpi
+ * uniquement) : leur envoyer du 300 dpi sort des **pages blanches en boucle** (job accepté, rien de
+ * rendu). D'où le `dpi` paramétrable, piloté par `capabilities.rasterDpi` côté MyStock.
  */
-async function rasterizePdfToPwg(pdf: Buffer): Promise<Buffer | null> {
+async function rasterizePdfToPwg(pdf: Buffer, dpi: number = RASTER_DPI): Promise<Buffer | null> {
     const base = join(tmpdir(), `mystock-print-${process.pid}-${Date.now()}`);
     const inPdf = `${base}.pdf`;
     const outPwg = `${base}.pwg`;
     await fs.writeFile(inPdf, pdf);
     try {
         // -F pwg : sortie PWG-Raster ; -r : résolution (dpi) ; -c gray : niveaux de gris (lasers N&B).
-        const ok = await runOk('mutool', ['draw', '-F', 'pwg', '-r', String(RASTER_DPI), '-c', 'gray', '-o', outPwg, inPdf]);
+        const ok = await runOk('mutool', ['draw', '-F', 'pwg', '-r', String(dpi), '-c', 'gray', '-o', outPwg, inPdf]);
         if (!ok) return null;
         const data = await fs.readFile(outPwg).catch(() => null);
         return data && data.length ? data : null;
@@ -130,7 +145,7 @@ export function describePrinterTrouble(device: AgentDevice, timeoutMs = 8_000): 
         const finish = (value: string | null): void => { if (!done) { done = true; resolve(value); } };
         const timer = setTimeout(() => finish(null), timeoutMs);
         try {
-            ipp.Printer(ippUri(device)).execute(
+            ippPrinter(device).execute(
                 'Get-Printer-Attributes',
                 { 'operation-attributes-tag': { 'requesting-user-name': 'mystock' } },
                 (err: any, res: any) => {
@@ -163,7 +178,7 @@ function printJobOnce(
     options: PrintOptions,
 ): Promise<void> {
     return new Promise((resolve, reject) => {
-        const printer = ipp.Printer(ippUri(device));
+        const printer = ippPrinter(device);
         // Attributs de job optionnels : seulement ceux explicitement demandés, pour ne pas
         // faire échouer une imprimante qui ne supporte pas l'attribut.
         const jobAttrs: Record<string, unknown> = {};
@@ -234,7 +249,11 @@ export async function printPdf(device: AgentDevice, pdf: Buffer, fileName: strin
 async function dispatchPdf(device: AgentDevice, pdf: Buffer, fileName: string, options: PrintOptions): Promise<void> {
     const forceRaster = device.capabilities?.['rasterize'] === true;
     if (forceRaster) {
-        const pwg = await rasterizePdfToPwg(pdf);
+        // Résolution imposée par l'imprimante (`pwg-raster-document-resolution-supported`) : certains
+        // modèles n'acceptent qu'une valeur (ex. HL-L2445DW = 600). Défaut 300 (universel) sinon.
+        const capDpi = Number(device.capabilities?.['rasterDpi']);
+        const dpi = Number.isFinite(capDpi) && capDpi > 0 ? capDpi : RASTER_DPI;
+        const pwg = await rasterizePdfToPwg(pdf, dpi);
         if (pwg) {
             // Rastérisation OK → on envoie le PWG. Si l'envoi échoue (imprimante bloquée/timeout),
             // on laisse l'erreur remonter : NE PAS retomber sur le PDF brut, qui sortirait blanc sur
