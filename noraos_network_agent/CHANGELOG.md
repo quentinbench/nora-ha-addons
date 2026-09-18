@@ -1,5 +1,11 @@
 # Changelog — NoraOS Network Agent
 
+## 0.9.2
+- 🔢 **Version rapportée corrigée.** L'agent affichait « 0.8.0 » dans le suivi MyStock alors qu'il
+  tournait déjà les correctifs 0.9.1 (impression 600 dpi, IPPS auto-signé) : le numéro lu au
+  démarrage (`package.json`) n'avait pas été republié sur le dépôt d'add-on. Republication du build
+  à jour — l'agent rapporte désormais sa version réelle. Aucun changement de comportement d'impression.
+
 ## 0.9.1
 - 🖨️ **Impression enfin correcte sur les imprimantes récentes.** Certaines imprimantes (Brother
   HL-L2445DW, HL-L2865DW, MFC-L2710DW…) n'acceptent qu'une **résolution précise** et sortaient des
