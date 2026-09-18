@@ -1,6 +1,6 @@
 # Changelog — NoraOS Network Agent
 
-## 0.9.2
+## 0.9.3
 - 🔢 **Version rapportée corrigée.** L'agent affichait « 0.8.0 » dans le suivi MyStock alors qu'il
   tournait déjà les correctifs 0.9.1 (impression 600 dpi, IPPS auto-signé) : le numéro lu au
   démarrage (`package.json`) n'avait pas été republié sur le dépôt d'add-on. Republication du build
